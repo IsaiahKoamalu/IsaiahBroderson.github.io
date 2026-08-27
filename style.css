@@ -4,8 +4,8 @@
   --border:    #232a38;   /* subtle dividers */
   --fg:        #d4d9e0;   /* main text */
   --fg-dim:    #8b95a5;   /* muted text */
-  --accent:    #4ade80;   /* primary accent (terminal green) */
-  --accent-2:  #38bdf8;   /* secondary accent (cyan) */
+  --accent:    #33006F;   /* primary accent */
+  --accent-2:  #38bdf8;   /* secondary accent */
   --glow:      rgba(74, 222, 128, 0.15);
 
   --font-body: system-ui, -apple-system, sans-serif;
