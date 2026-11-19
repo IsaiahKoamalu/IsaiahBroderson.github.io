@@ -186,6 +186,7 @@ h1 {
 }
 .seg button:hover { color: var(--ink); background: rgba(255, 255, 255, 0.07); }
 .seg button.on { color: #10140a; background: var(--lead); font-weight: 500; }
+.seg button:disabled { opacity: 0.35; cursor: default; background: transparent; }
 
 .console {
   position: absolute;
@@ -202,6 +203,8 @@ h1 {
   text-transform: uppercase;
   color: var(--ink-faint);
 }
+.seg.modes { margin: -0.35rem -0.35rem 0.75rem; }
+.seg.modes button { flex: 1; padding: 0.38rem 0.4rem; font-size: 0.7rem; }
 .readout { display: flex; justify-content: space-between; gap: 1rem; }
 .readout > div:last-child { text-align: right; }
 .readout b {

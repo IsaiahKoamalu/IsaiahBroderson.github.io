@@ -49,6 +49,7 @@
       <button type="button" data-task="hunt" class="on">Hunt</button>
       <button type="button" data-task="field">Asteroid field</button>
       <button type="button" data-task="land">Land</button>
+      <button type="button" data-task="orbit">Orbit</button>
     </div>
     <div class="seg">
       <button type="button" id="pause">Pause</button>
@@ -57,8 +58,12 @@
   </div>
 
   <aside class="console panel" aria-label="Training progress">
+    <div class="seg modes" id="modes" role="group" aria-label="Which brains fly the ships">
+      <button type="button" data-mode="live" class="on" title="Trained from scratch right now, in your browser">Learning live</button>
+      <button type="button" data-mode="python" title="Trained offline in Python with PPO, then exported to this page">Trained in Python</button>
+    </div>
     <div class="readout">
-      <div><span>generation</span><b id="gen">0</b></div>
+      <div><span id="gen-label">generation</span><b id="gen">0</b></div>
       <div><span id="metric-label">beacons / run</span><b id="metric">0</b></div>
     </div>
     <canvas id="chart"></canvas>

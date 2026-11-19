@@ -27,15 +27,43 @@
   const net = $('net'), nctx = net.getContext('2d');
 
   // ---------- State ----------
-  let task = 'hunt', running = !REDUCED, onscreen = true, scrubGen = null;
+  let task = 'hunt', mode = 'live', running = !REDUCED, onscreen = true, scrubGen = null;
   const trainers = {};
   const trainer = () => trainers[task] || (trainers[task] = new S.Trainer(task));
 
+  // ---------- Brains trained offline in Python (github.com/IsaiahKoamalu/fleet-rl) ----------
+  const python = {};   // task → { status: 'loading' | 'ready' | 'failed', src }
+  function fromPolicyFile(doc) {
+    const cps = doc.checkpoints;
+    return {
+      python: true, algo: doc.algo, unit: doc.unit, layers: doc.layers,
+      generation: cps.length - 1,
+      at: cps.map((c) => c.at),
+      snapshots: cps.map((c) => Float64Array.from(c.params)),
+      history: cps.slice(1).map((c) => c.metrics)   // history[g - 1] scores snapshot g, as in the live trainer
+    };
+  }
+  function loadPython(t) {
+    if (python[t] && python[t].status !== 'failed') return;
+    python[t] = { status: 'loading' };
+    fetch(`policies/${t}.json`)
+      .then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then((doc) => {
+        python[t] = { status: 'ready', src: fromPolicyFile(doc) };
+        if (t === task && mode === 'python') { scrubGen = null; startWave(); updateReadouts(); }
+      })
+      .catch(() => { python[t] = { status: 'failed' }; if (t === task) updateReadouts(); });
+  }
+  // What the fleet flies right now: the live trainer, or a loaded Python policy file.
+  function source() {
+    const b = mode === 'python' && python[task];
+    return b && b.src ? b.src : trainer();
+  }
+  const gauss = () => Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
+
   let sc, fleet = [], particles = [], rings = [], rocks = [], userRocks = [];
   let beacon = null, beaconIdx = 0, waveT = 0, doneT = 0;
-  const trace = {
-    input: new Float64Array(S.N_IN), hidden: new Float64Array(S.N_HID), output: new Float64Array(S.N_OUT)
-  };
+  let trace = S.makeActs(S.LAYERS);   // lead ship's activations, layer by layer
   const pointer = { x: 0, y: 0, at: -1e9 };
   const pointerActive = () => performance.now() - pointer.at < 2500;
 
@@ -91,40 +119,52 @@
   function fleetSize() { return view.w < 700 ? 14 : 28; }
 
   function startWave() {
-    const tr = trainer();
+    const tr = source();
     const gen = scrubGen === null ? tr.generation : scrubGen;
-    const mean = tr.snapshots[gen];
+    const mean = tr.snapshots[gen], layers = tr.layers || S.LAYERS;
+    trace = S.makeActs(layers);
     sc = S.makeScenario(task, (Math.random() * 1e9) | 0);
     sc.asteroids = sc.asteroids.concat(task === 'field' ? userRocks : []);
-    rocks = sc.asteroids.map(buildRock);
+    rocks = sc.asteroids.filter((a) => !a.planet).map(buildRock);
     if (task === 'land' && pointerActive()) movePad(pointer.x);
+    if (task === 'orbit') { if (orbitR) sc.orbitR = orbitR; if (pointerActive()) setOrbit(pointer.x, pointer.y); }
 
     beaconIdx = 0;
     beacon = sc.targets[0];
-    sc.override = task === 'land' ? null : beacon;
+    sc.override = task === 'land' || task === 'orbit' ? null : beacon;
     waveT = 0; doneT = 0;
 
     fleet = [];
     const n = fleetSize();
     for (let i = 0; i < n; i++) {
-      const p = new Float64Array(S.N_PARAMS);
-      const spread = gen === 0 ? 0.8 : scrubGen === null ? 0.5 : 0.12;
-      for (let k = 0; k < S.N_PARAMS; k++) {
-        const sd = scrubGen === null ? tr.sigma[k] : 1;
-        p[k] = mean[k] + (i === 0 ? 0 : tr.gauss() * sd * spread);
+      const p = new Float64Array(mean.length);
+      if (tr.python) {
+        // one trained policy; a little weight noise so the fleet does not fly in lockstep
+        for (let k = 0; k < p.length; k++) p[k] = mean[k] + (i === 0 || gen === 0 ? 0 : gauss() * 0.03);
+      } else {
+        const spread = gen === 0 ? 0.8 : scrubGen === null ? 0.5 : 0.12;
+        for (let k = 0; k < p.length; k++) {
+          const sd = scrubGen === null ? tr.sigma[k] : 1;
+          p[k] = mean[k] + (i === 0 ? 0 : tr.gauss() * sd * spread);
+        }
       }
       const ship = S.newShip(sc, task === 'land' ? 0 : 90);
       if (task === 'land') {
         ship.x = clamp(ship.x + rand(-320, 320), 60, S.W - 60);
         ship.y += rand(-40, 40);
       }
-      fleet.push({ ship, p, lead: i === 0, trail: [], px: ship.x, py: ship.y, pa: ship.a, was: true });
+      fleet.push({ ship, brain: { p, layers }, lead: i === 0, trail: [], px: ship.x, py: ship.y, pa: ship.a, was: true });
     }
   }
 
   function movePad(x) {
     sc.padX = clamp(x, 160, S.W - 160);
     sc.targets[0].x = sc.padX;
+  }
+  // Orbit: the cursor's distance from the planet sets the target orbit, and it sticks between waves.
+  let orbitR = 0;
+  function setOrbit(x, y) {
+    orbitR = sc.orbitR = clamp(Math.hypot(x - S.PLANET.x, y - S.PLANET.y), S.ORBIT_MIN, S.ORBIT_MAX);
   }
 
   function burst(x, y, color, n, speed) {
@@ -138,6 +178,8 @@
   function tick() {
     if (task === 'land') {
       if (pointerActive()) movePad(pointer.x);
+    } else if (task === 'orbit') {
+      if (pointerActive()) setOrbit(pointer.x, pointer.y);
     } else if (pointerActive()) {
       sc.override = { x: clamp(pointer.x, 30, S.W - 30), y: clamp(pointer.y, 30, S.H - 30) };
     } else {
@@ -149,7 +191,7 @@
       const s = f.ship;
       f.px = s.x; f.py = s.y; f.pa = s.a;
       if (s.alive) {
-        S.stepShip(s, f.p, sc, f.lead ? trace : undefined);
+        S.stepShip(s, f.brain, sc, f.lead ? trace : undefined);
         f.trail.push(s.x, s.y);
         if (f.trail.length > TRAIL * 2) f.trail.splice(0, 2);
         alive++;
@@ -164,7 +206,7 @@
     }
 
     // shared beacon: first ship to touch it moves it along
-    if (task !== 'land' && sc.override === beacon) {
+    if (task !== 'land' && task !== 'orbit' && sc.override === beacon) {
       const hit = fleet.some((f) => f.ship.alive && Math.hypot(f.ship.x - beacon.x, f.ship.y - beacon.y) < S.REACH_R);
       if (hit) {
         rings.push({ x: beacon.x, y: beacon.y, r: S.REACH_R, life: 1, color: COL.lead });
@@ -176,7 +218,8 @@
 
     waveT += S.DT;
     if (!alive) doneT += S.DT;
-    const training = scrubGen === null && trainer().generation < generationCap(trainer());
+    const tr = source();
+    const training = !tr.python && scrubGen === null && tr.generation < generationCap(tr);
     const waveLen = task === 'land' ? 11.5 : training ? 9 : 24;
     if (doneT > 1.1 || waveT > waveLen) startWave();
   }
@@ -205,6 +248,25 @@
     ctx.moveTo(size, 0); ctx.lineTo(-size * 0.72, -size * 0.62); ctx.lineTo(-size * 0.36, 0); ctx.lineTo(-size * 0.72, size * 0.62);
     ctx.closePath(); ctx.fill();
     ctx.restore();
+  }
+
+  function drawPlanet() {
+    const P = S.PLANET, cx = X(P.x), cy = Y(P.y), r = P.r * view.s;
+    // target orbit
+    ctx.save();
+    ctx.setLineDash([3, 9]);
+    ctx.strokeStyle = rgba(COL.lead, 0.45); ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(cx, cy, sc.orbitR * view.s, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+    // atmosphere glow, then the planet lit from the upper left
+    const glow = ctx.createRadialGradient(cx, cy, r * 0.9, cx, cy, r * 1.9);
+    glow.addColorStop(0, rgba(COL.fleet, 0.22)); glow.addColorStop(1, rgba(COL.fleet, 0));
+    ctx.fillStyle = glow;
+    ctx.beginPath(); ctx.arc(cx, cy, r * 1.9, 0, Math.PI * 2); ctx.fill();
+    const body = ctx.createRadialGradient(cx - r * 0.4, cy - r * 0.45, r * 0.1, cx, cy, r);
+    body.addColorStop(0, '#5d7fa8'); body.addColorStop(0.55, '#26385a'); body.addColorStop(1, '#0d1424');
+    ctx.fillStyle = body;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
   }
 
   function draw(alpha, now) {
@@ -236,6 +298,8 @@
       ctx.shadowColor = COL.lead; ctx.shadowBlur = 18;
       ctx.fillStyle = COL.lead; ctx.fillRect(x0, gy - 2, x1 - x0, 4);
       ctx.restore();
+    } else if (task === 'orbit') {
+      drawPlanet();
     } else {
       // beacon or cursor target
       const t = sc.override, pulse = REDUCED ? 0.5 : (Math.sin(now / 240) + 1) / 2;
@@ -306,7 +370,8 @@
   const METRIC = {
     hunt:  { label: 'beacons / run', get: (h) => h.reached.toFixed(1) },
     field: { label: 'survival',      get: (h) => Math.round((1 - h.crashed) * 100) + '%' },
-    land:  { label: 'safe landings', get: (h) => Math.round(h.landed * 100) + '%' }
+    land:  { label: 'safe landings', get: (h) => Math.round(h.landed * 100) + '%' },
+    orbit: { label: 'orbits / run',  get: (h) => (h.orbits || 0).toFixed(2) }
   };
 
   function generationCap(tr) {
@@ -315,14 +380,17 @@
   }
 
   function isReady(tr) {
+    if (tr.python) return true;
     const h = tr.history[tr.history.length - 1];
     if (!h) return false;
     return task === 'land' ? h.landed >= 0.6 : tr.generation >= TRAINED_AT;
   }
 
   function updateReadouts() {
-    const tr = trainer(), gen = scrubGen === null ? tr.generation : scrubGen;
-    $('gen').textContent = gen;
+    const tr = source(), gen = scrubGen === null ? tr.generation : scrubGen;
+    const unit = tr.python ? tr.unit : 'generation';
+    $('gen-label').textContent = unit;
+    $('gen').textContent = tr.python ? tr.at[gen] : gen;
     $('metric-label').textContent = METRIC[task].label;
     const h = tr.history[gen - 1];
     $('metric').textContent = h ? METRIC[task].get(h) : '—';
@@ -331,13 +399,20 @@
     range.max = tr.generation;
     if (scrubGen === null) range.value = tr.generation;
     $('live').hidden = scrubGen === null;
+    $('live').textContent = tr.python ? 'final' : 'live';
+    $('restart').disabled = !!tr.python;
 
+    const status = mode === 'python' && python[task] ? python[task].status : null;
     let msg;
-    if (scrubGen !== null) msg = `Rewound to generation ${scrubGen}. This is how they flew back then.`;
+    if (status === 'loading') msg = 'Loading the brain trained in Python…';
+    else if (status === 'failed') msg = 'Could not load the Python-trained brain. Showing live training instead.';
+    else if (scrubGen !== null) msg = `Rewound to ${unit} ${tr.python ? tr.at[gen] : gen}. This is how they flew back then.`;
     else if (!isReady(tr)) msg = 'Still learning the controls. Give them a few seconds.';
     else if (task === 'hunt') msg = TOUCH ? 'Tap the sky. They will chase it.' : 'Move your cursor. They will chase it.';
     else if (task === 'field') msg = (TOUCH ? 'Tap' : 'Click') + ' to drop an asteroid in their way.';
+    else if (task === 'orbit') msg = (TOUCH ? 'Tap' : 'Move your cursor') + ' to raise or lower their orbit.';
     else msg = TOUCH ? 'Tap the sky to move the landing pad.' : 'Move your cursor to slide the landing pad.';
+    if (tr.python && scrubGen === null) msg = `${tr.algo.toUpperCase()}, trained in Python. ${msg}`;
     if ($('hint').textContent !== msg) $('hint').textContent = msg;
 
     drawChart(tr, gen);
@@ -349,7 +424,7 @@
     if (H_.length < 2) return;
     const vals = H_.map((v) => v.fitness);
     const lo = Math.min(...vals), hi = Math.max(...vals), span = Math.max(1e-6, hi - lo);
-    const px = (i) => (i / Math.max(MAX_GENERATIONS - 1, H_.length - 1)) * w;
+    const px = (i) => (i / Math.max(tr.python ? 1 : MAX_GENERATIONS - 1, H_.length - 1)) * w;
     const py = (v) => h - 3 - ((v - lo) / span) * (h - 6);
     cctx.beginPath();
     vals.forEach((v, i) => cctx[i ? 'lineTo' : 'moveTo'](px(i), py(v)));
@@ -368,19 +443,19 @@
     if (!w || !fleet[0]) return;
     nctx.clearRect(0, 0, w, h);
     netMax = Math.max(netPeak, 1e-6); netPeak = 0;
-    const p = fleet[0].p, cols = [S.N_IN, S.N_HID, S.N_OUT], xs = [8, w / 2, w - 8];
+    const { p, layers: cols } = fleet[0].brain, L = cols.length;
+    if (trace.length !== L) return;
+    const xs = cols.map((_, c) => 8 + ((w - 16) * c) / (L - 1));
     const nodeY = (c, i) => (h * (i + 0.5)) / cols[c];
     let k = 0;
     nctx.lineWidth = 1;
-    for (let j = 0; j < S.N_HID; j++) {
-      for (let i = 0; i < S.N_IN; i++) link(xs[0], nodeY(0, i), xs[1], nodeY(1, j), p[k++] * trace.input[i]);
-      k++;
+    for (let l = 1; l < L; l++) {
+      for (let o = 0; o < cols[l]; o++) {
+        for (let i = 0; i < cols[l - 1]; i++) link(xs[l - 1], nodeY(l - 1, i), xs[l], nodeY(l, o), p[k++] * trace[l - 1][i]);
+        k++;
+      }
     }
-    for (let o = 0; o < S.N_OUT; o++) {
-      for (let j = 0; j < S.N_HID; j++) link(xs[1], nodeY(1, j), xs[2], nodeY(2, o), p[k++] * trace.hidden[j]);
-      k++;
-    }
-    [trace.input, trace.hidden, trace.output].forEach((vals, c) => {
+    trace.forEach((vals, c) => {
       for (let i = 0; i < cols[c]; i++) {
         const v = Math.min(1, Math.abs(vals[i]));
         nctx.fillStyle = rgba(vals[i] >= 0 ? COL.lead : COL.fleet, 0.2 + 0.8 * v);
@@ -407,17 +482,27 @@
     task = b.dataset.task;
     scrubGen = null;
     document.querySelectorAll('#tasks button').forEach((x) => x.classList.toggle('on', x === b));
+    if (mode === 'python') loadPython(task);
+    startWave(); updateReadouts();
+  }));
+  document.querySelectorAll('#modes button').forEach((b) => b.addEventListener('click', () => {
+    if (mode === b.dataset.mode) return;
+    mode = b.dataset.mode;
+    scrubGen = null;
+    document.querySelectorAll('#modes button').forEach((x) => x.classList.toggle('on', x === b));
+    if (mode === 'python') loadPython(task);
     startWave(); updateReadouts();
   }));
   $('pause').addEventListener('click', () => setRunning(!running));
   $('restart').addEventListener('click', () => {
+    if (source().python) return;
     delete trainers[task];
     scrubGen = null; userRocks = [];
     startWave(); updateReadouts();
   });
   $('scrub').addEventListener('input', (e) => {
     const v = +e.target.value;
-    scrubGen = v >= trainer().generation ? null : v;
+    scrubGen = v >= source().generation ? null : v;
     startWave(); updateReadouts();
   });
   $('live').addEventListener('click', () => { scrubGen = null; startWave(); updateReadouts(); });
@@ -461,8 +546,8 @@
     if (!onscreen || document.hidden) return;
 
     if (running) {
-      const tr = trainer();
-      if (tr.generation < generationCap(tr)) tr.run(TRAIN_MS);
+      const tr = source();
+      if (!tr.python && tr.generation < generationCap(tr)) tr.run(TRAIN_MS);
       acc += elapsed / 1000;
       while (acc >= S.DT) { tick(); acc -= S.DT; }
     }
