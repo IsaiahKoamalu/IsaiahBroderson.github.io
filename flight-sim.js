@@ -24,11 +24,23 @@ var FlightSim = (function () {
   const FUEL = 0.1;         // fitness cost per tick at full thrust: high enough that coasting pays
   const ORBIT_MIN = 150, ORBIT_MAX = 340;
 
+  // Dock: match orbits with a station circling the planet and touch it gently.
+  const DOCK_R = 36;        // touching distance
+  const DOCK_V = 70;        // docking succeeds below this relative speed; faster is a crash
+  const DOCK_BONUS = 8;     // fitness for docking
+  const DOCK_PULL = 150;    // shaping: 1 fitness per this many px closer to the station
+  const DOCK_NEAR = 200;    // shaping: within this distance, relative speed starts to cost
+  const DOCK_SLOW = 60;     // shaping: 1 fitness per this much relative speed shed right at the station
+  const DOCK_FUEL = 0.02;   // fitness cost per tick at full thrust
+  const DOCK_GAP = [0.2, 1.0], DOCK_DR = 50, DOCK_SPEED = [0.9, 1.1];   // starts: behind (rad), off-orbit (px), speed
+  const planetary = (task) => task === 'orbit' || task === 'dock';
+
   const TASKS = {
     hunt:  { label: 'Hunt',  steps: 300, asteroids: 0, gravity: 0, drag: 0.97 },
     field: { label: 'Asteroid field', steps: 300, asteroids: 10, gravity: 0, drag: 0.94 },   // slow enough to dodge
     land:  { label: 'Land',  steps: 300, asteroids: 0, gravity: GRAVITY, drag: 0.97 },
-    orbit: { label: 'Orbit', steps: 300, asteroids: 0, gravity: 0, drag: 1 }                 // no drag, or orbits decay
+    orbit: { label: 'Orbit', steps: 300, asteroids: 0, gravity: 0, drag: 1 },                // no drag, or orbits decay
+    dock:  { label: 'Dock',  steps: 300, asteroids: 0, gravity: 0, drag: 1 }
   };
 
   // ---------- Network: inputs → hidden layers (softsign) → outputs ----------
@@ -71,8 +83,22 @@ var FlightSim = (function () {
   // ---------- Scenarios ----------
   function makeScenario(task, seed) {
     const r = rng(seed), cfg = TASKS[task];
-    const sc = { task, gravity: cfg.gravity, drag: cfg.drag, steps: cfg.steps, asteroids: [], targets: [], override: null, padX: 0, orbitR: 0 };
+    const sc = { task, gravity: cfg.gravity, drag: cfg.drag, steps: cfg.steps, asteroids: [], targets: [], override: null, padX: 0, orbitR: 0, stationA: 0 };
     const between = (a, b) => a + r() * (b - a);
+
+    if (task === 'dock') {
+      // A station on a circular orbit (radius orbitR); the ship starts behind it on a nearby,
+      // roughly circular orbit.
+      sc.orbitR = between(200, 320);
+      sc.stationA = between(-Math.PI, Math.PI);
+      const ang = sc.stationA - between(DOCK_GAP[0], DOCK_GAP[1]);
+      const rad = sc.orbitR + between(-DOCK_DR, DOCK_DR);
+      const a = between(-Math.PI, Math.PI), v = Math.sqrt(GM / rad) * between(DOCK_SPEED[0], DOCK_SPEED[1]);
+      sc.start = { x: PLANET.x + Math.cos(ang) * rad, y: PLANET.y + Math.sin(ang) * rad, a,
+                   vx: -Math.sin(ang) * v, vy: Math.cos(ang) * v };
+      sc.asteroids = [{ x: PLANET.x, y: PLANET.y, r: PLANET.r, planet: true }];
+      return sc;
+    }
 
     if (task === 'orbit') {
       // Start on a rough orbit (60-115% of circular speed); the job is to transfer to the
@@ -121,17 +147,32 @@ var FlightSim = (function () {
   function newShip(sc, jitter) {
     const s = sc.start, j = jitter || 0;
     const x = s.x + (Math.random() - 0.5) * j, y = s.y + (Math.random() - 0.5) * j;
+    let pot = 0;   // Dock: shaping potential last tick
+    if (sc.task === 'dock') {
+      const st = stationAt(sc, 0);
+      pot = dockPotential(Math.hypot(st.x - x, st.y - y), Math.hypot(s.vx - st.vx, s.vy - st.vy));
+    }
     return {
       x, y, a: s.a, vx: s.vx, vy: s.vy, w: 0,
-      thrust: 0, turn: 0, alive: true, landed: false, crashed: false,
+      thrust: 0, turn: 0, alive: true, landed: false, crashed: false,   // landed: touched down or docked
       idx: 0, reached: 0, t: 0, fitness: 0,
       phi: Math.atan2(y - PLANET.y, x - PLANET.x), orbits: 0,   // angle around the planet; orbits credited
       rerr: Math.abs(Math.hypot(x - PLANET.x, y - PLANET.y) - sc.orbitR),   // distance from the target orbit
-      prevD: null, rays: new Float64Array(RAYS.length)
+      pot, prevD: null, rays: new Float64Array(RAYS.length)
     };
   }
 
+  // Dock: the station's position and velocity after t ticks. It circles at circular speed.
+  function stationAt(sc, t) {
+    const r = sc.orbitR, w = Math.sqrt(GM / (r * r * r)), ang = sc.stationA + w * t * DT;
+    const c = Math.cos(ang), s = Math.sin(ang);
+    return { x: PLANET.x + c * r, y: PLANET.y + s * r, vx: -s * w * r, vy: c * w * r, a: ang };
+  }
+  // Shaping for Dock: closer is better, and near the station, slower relative to it is better.
+  const dockPotential = (d, rv) => -d / DOCK_PULL - Math.max(0, 1 - d / DOCK_NEAR) * rv / DOCK_SLOW;
+
   function currentTarget(ship, sc) {
+    if (sc.task === 'dock') return stationAt(sc, ship.t);
     if (sc.task === 'orbit') {   // a guide point on the target orbit, a little ahead of the ship
       const ang = Math.atan2(ship.y - PLANET.y, ship.x - PLANET.x) + ORBIT_LEAD;
       return { x: PLANET.x + Math.cos(ang) * sc.orbitR, y: PLANET.y + Math.sin(ang) * sc.orbitR };
@@ -163,13 +204,16 @@ var FlightSim = (function () {
     input[0] = soft((dx * ca + dy * sa) / 300);
     input[1] = soft((-dx * sa + dy * ca) / 300);
     input[2] = Math.min(1, d / 900);
-    input[3] = soft((ship.vx * ca + ship.vy * sa) / 250);
-    input[4] = soft((-ship.vx * sa + ship.vy * ca) / 250);
+    // Velocity relative to the target (only the Dock station moves).
+    let vx = ship.vx, vy = ship.vy;
+    if (sc.task === 'dock') { vx -= t.vx; vy -= t.vy; }
+    input[3] = soft((vx * ca + vy * sa) / 250);
+    input[4] = soft((-vx * sa + vy * ca) / 250);
     input[5] = soft(ship.w / 3);
-    // Heading relative to "down": the screen's down, or toward the planet in Orbit.
+    // Heading relative to "down": the screen's down, or toward the planet in Orbit and Dock.
     // With down = (0, 1) these are just sin(a) and cos(a).
     let ux = 0, uy = 1;
-    if (sc.task === 'orbit') {
+    if (planetary(sc.task)) {
       const gx = PLANET.x - ship.x, gy = PLANET.y - ship.y, g = Math.hypot(gx, gy);
       ux = gx / g; uy = gy / g;
     }
@@ -201,7 +245,7 @@ var FlightSim = (function () {
     ship.a += ship.w * DT;
     ship.vx += Math.cos(ship.a) * ship.thrust * THRUST * DT;
     ship.vy += (Math.sin(ship.a) * ship.thrust * THRUST + sc.gravity) * DT;
-    if (sc.task === 'orbit') {   // inverse-square pull toward the planet, from the pre-move position
+    if (planetary(sc.task)) {   // inverse-square pull toward the planet, from the pre-move position
       const gx = PLANET.x - ship.x, gy = PLANET.y - ship.y, r2 = gx * gx + gy * gy;
       const f = GM / (r2 * Math.sqrt(r2)) * DT;
       ship.vx += gx * f; ship.vy += gy * f;
@@ -227,6 +271,7 @@ var FlightSim = (function () {
       }
     }
     if (sc.task === 'orbit') return orbitReward(ship, sc);
+    if (sc.task === 'dock') return dockReward(ship, sc);
 
     const t = currentTarget(ship, sc), d = Math.hypot(t.x - ship.x, t.y - ship.y);
     ship.fitness += (ship.prevD - d) / 500;
@@ -256,6 +301,22 @@ var FlightSim = (function () {
     ship.phi = phi;
     ship.rerr = err;
     ship.orbits += gain;
+  }
+
+  // Touching the station slowly docks (landed); touching it fast is a crash.
+  // Otherwise potential-based shaping toward it, and a fuel cost.
+  function dockReward(ship, sc) {
+    const st = stationAt(sc, ship.t);
+    const d = Math.hypot(st.x - ship.x, st.y - ship.y), rv = Math.hypot(ship.vx - st.vx, ship.vy - st.vy);
+    if (d < DOCK_R) {
+      ship.alive = false;
+      if (rv < DOCK_V) { ship.landed = true; ship.fitness += DOCK_BONUS; }
+      else { ship.crashed = true; ship.fitness -= CRASH_PENALTY; }
+      return;
+    }
+    const pot = dockPotential(d, rv);
+    ship.fitness += pot - ship.pot - ship.thrust * DOCK_FUEL;
+    ship.pot = pot;
   }
 
   function stepLand(ship, sc) {
@@ -383,8 +444,8 @@ var FlightSim = (function () {
   };
 
   return {
-    W, H, DT, GROUND, PAD_HALF, SHIP_R, REACH_R, RAY_LEN, RAYS, TASKS, PLANET, GM, ORBIT_MIN, ORBIT_MAX,
+    W, H, DT, GROUND, PAD_HALF, SHIP_R, REACH_R, RAY_LEN, RAYS, TASKS, PLANET, GM, ORBIT_MIN, ORBIT_MAX, DOCK_R,
     N_IN, N_HID, N_OUT, N_PARAMS, LAYERS, nParams, makeActs,
-    makeScenario, newShip, stepShip, evaluate, Trainer, currentTarget
+    makeScenario, newShip, stepShip, evaluate, Trainer, currentTarget, stationAt
   };
 })();

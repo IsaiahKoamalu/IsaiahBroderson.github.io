@@ -62,7 +62,8 @@
   const gauss = () => Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
 
   let sc, fleet = [], particles = [], rings = [], rocks = [], userRocks = [];
-  let beacon = null, beaconIdx = 0, waveT = 0, doneT = 0;
+  let beacon = null, beaconIdx = 0, waveT = 0, waveStep = 0, doneT = 0;
+  const chases = () => task === 'hunt' || task === 'field';   // tasks with beacons the cursor can replace
   let trace = S.makeActs(S.LAYERS);   // lead ship's activations, layer by layer
   const pointer = { x: 0, y: 0, at: -1e9 };
   const pointerActive = () => performance.now() - pointer.at < 2500;
@@ -103,8 +104,36 @@
       g.fill();
     }
   }
-  const X = (x) => view.ox + x * view.s;
-  const Y = (y) => view.oy + y * view.s;
+  // Camera: the world point at the centre of the screen, and a zoom. It eases in on a followed ship.
+  const ZOOM = 1.7;
+  const cam = { x: S.W / 2, y: S.H / 2, z: 1 };
+  const X = (x) => view.ox + view.s * (S.W / 2 + (x - cam.x) * cam.z);
+  const Y = (y) => view.oy + view.s * (S.H / 2 + (y - cam.y) * cam.z);
+  const Z = () => view.s * cam.z;   // screen pixels per world unit
+
+  // Click a ship to follow it: -1 follows nobody (the console shows the lead ship).
+  let follow = -1;
+  const watched = () => fleet[follow] || fleet[0];
+  const lerpPos = (f, alpha) => [f.px + (f.ship.x - f.px) * alpha, f.py + (f.ship.y - f.py) * alpha];
+
+  function updateCamera(dt, alpha) {
+    const f = follow >= 0 && !REDUCED ? fleet[follow] : null;
+    const [tx, ty] = f ? lerpPos(f, alpha) : [S.W / 2, S.H / 2];
+    const kz = 1 - Math.exp(-dt * 3), kp = f && cam.z > 1.02 ? 1 - Math.exp(-dt * 6) : kz;
+    cam.z += ((f ? ZOOM : 1) - cam.z) * kz;
+    cam.x += (tx - cam.x) * kp;
+    cam.y += (ty - cam.y) * kp;
+    // never show past the edge of the world, unless the whole world already fits
+    const hw = view.w / (2 * Z()), hh = view.h / (2 * Z());
+    cam.x = hw >= S.W / 2 ? S.W / 2 : clamp(cam.x, hw, S.W - hw);
+    cam.y = hh >= S.H / 2 ? S.H / 2 : clamp(cam.y, hh, S.H - hh);
+  }
+
+  function setFollow(i) {
+    follow = i;
+    netMax = 1e-6;
+    updateReadouts();
+  }
 
   // ---------- Waves: each one flies the newest brains ----------
   function buildRock(c) {
@@ -131,8 +160,8 @@
 
     beaconIdx = 0;
     beacon = sc.targets[0];
-    sc.override = task === 'land' || task === 'orbit' ? null : beacon;
-    waveT = 0; doneT = 0;
+    sc.override = chases() ? beacon : null;
+    waveT = 0; waveStep = 0; doneT = 0;
 
     fleet = [];
     const n = fleetSize();
@@ -155,6 +184,7 @@
       }
       fleet.push({ ship, brain: { p, layers }, lead: i === 0, trail: [], px: ship.x, py: ship.y, pa: ship.a, was: true });
     }
+    if (follow >= fleet.length) follow = -1;
   }
 
   function movePad(x) {
@@ -180,6 +210,8 @@
       if (pointerActive()) movePad(pointer.x);
     } else if (task === 'orbit') {
       if (pointerActive()) setOrbit(pointer.x, pointer.y);
+    } else if (task === 'dock') {
+      // nothing to steer: the station keeps its orbit
     } else if (pointerActive()) {
       sc.override = { x: clamp(pointer.x, 30, S.W - 30), y: clamp(pointer.y, 30, S.H - 30) };
     } else {
@@ -187,11 +219,12 @@
     }
 
     let alive = 0;
+    const w = watched();
     for (const f of fleet) {
       const s = f.ship;
       f.px = s.x; f.py = s.y; f.pa = s.a;
       if (s.alive) {
-        S.stepShip(s, f.brain, sc, f.lead ? trace : undefined);
+        S.stepShip(s, f.brain, sc, f === w ? trace : undefined);
         f.trail.push(s.x, s.y);
         if (f.trail.length > TRAIL * 2) f.trail.splice(0, 2);
         alive++;
@@ -201,12 +234,16 @@
       if (f.was && !s.alive) {
         if (s.crashed) burst(s.x, s.y, COL.hot, f.lead ? 34 : 18, 7);
         if (s.landed) rings.push({ x: s.x, y: s.y, r: 8, life: 1, color: COL.lead });
+        if (s.landed && task === 'dock') {   // remember where on the station it docked
+          const st = S.stationAt(sc, s.t), c = Math.cos(-st.a), n = Math.sin(-st.a), dx = s.x - st.x, dy = s.y - st.y;
+          f.dock = { x: dx * c - dy * n, y: dx * n + dy * c, a: s.a - st.a };
+        }
       }
       f.was = s.alive;
     }
 
     // shared beacon: first ship to touch it moves it along
-    if (task !== 'land' && task !== 'orbit' && sc.override === beacon) {
+    if (chases() && sc.override === beacon) {
       const hit = fleet.some((f) => f.ship.alive && Math.hypot(f.ship.x - beacon.x, f.ship.y - beacon.y) < S.REACH_R);
       if (hit) {
         rings.push({ x: beacon.x, y: beacon.y, r: S.REACH_R, life: 1, color: COL.lead });
@@ -217,10 +254,20 @@
     }
 
     waveT += S.DT;
+    waveStep++;
+    if (task === 'dock') {
+      const st = S.stationAt(sc, waveStep), c = Math.cos(st.a), n = Math.sin(st.a);
+      for (const f of fleet) {
+        if (!f.dock) continue;
+        const s = f.ship;
+        f.px = s.x; f.py = s.y; f.pa = s.a;
+        s.x = st.x + f.dock.x * c - f.dock.y * n; s.y = st.y + f.dock.x * n + f.dock.y * c; s.a = st.a + f.dock.a;
+      }
+    }
     if (!alive) doneT += S.DT;
     const tr = source();
     const training = !tr.python && scrubGen === null && tr.generation < generationCap(tr);
-    const waveLen = task === 'land' ? 11.5 : training ? 9 : 24;
+    const waveLen = task === 'land' ? 11.5 : task === 'dock' ? (training ? 10.5 : 14) : training ? 9 : 24;
     if (doneT > 1.1 || waveT > waveLen) startWave();
   }
 
@@ -229,7 +276,7 @@
     const s = f.ship;
     const x = X(f.px + (s.x - f.px) * alpha), y = Y(f.py + (s.y - f.py) * alpha);
     const a = f.pa + (s.a - f.pa) * alpha;
-    const size = (f.lead ? 15 : 10.5) * Math.max(0.72, view.s);
+    const size = (f.lead ? 15 : 10.5) * Math.max(0.72, view.s) * (1 + (cam.z - 1) * 0.6);
     const color = f.lead ? COL.lead : COL.fleet;
     ctx.save();
     ctx.translate(x, y); ctx.rotate(a);
@@ -250,13 +297,45 @@
     ctx.restore();
   }
 
-  function drawPlanet() {
-    const P = S.PLANET, cx = X(P.x), cy = Y(P.y), r = P.r * view.s;
+  // Corner brackets around the followed ship.
+  function drawFocus(f, alpha) {
+    const [wx, wy] = lerpPos(f, alpha), x = X(wx), y = Y(wy);
+    const r = 24 * Math.max(0.8, Z()), c = r * 0.42;
+    ctx.strokeStyle = rgba(COL.ink, f.ship.alive ? 0.85 : 0.35); ctx.lineWidth = 1.5;
+    for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+      ctx.beginPath();
+      ctx.moveTo(x + sx * r, y + sy * (r - c)); ctx.lineTo(x + sx * r, y + sy * r); ctx.lineTo(x + sx * (r - c), y + sy * r);
+      ctx.stroke();
+    }
+  }
+
+  // Dock: the station, its solar panels pointing away from the planet, inside its docking zone.
+  function drawStation(alpha, now) {
+    const st = S.stationAt(sc, Math.max(0, waveStep - 1 + alpha)), k = Z();
+    const x = X(st.x), y = Y(st.y);
+    ctx.save();
+    ctx.setLineDash([2, 5]);
+    ctx.strokeStyle = rgba(COL.lead, 0.5); ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(x, y, S.DOCK_R * k, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.translate(x, y); ctx.rotate(st.a); ctx.scale(k, k);
+    ctx.fillStyle = '#8a93a6'; ctx.fillRect(-11, -1, 22, 2);              // truss
+    ctx.fillStyle = '#26456f'; ctx.strokeStyle = '#7d9cc9'; ctx.lineWidth = 1 / k;
+    for (const px of [-24, 11]) { ctx.fillRect(px, -5, 13, 10); ctx.strokeRect(px, -5, 13, 10); }   // panels
+    ctx.fillStyle = COL.ink; ctx.fillRect(-4, -9, 8, 18);                 // hull, along the orbit
+    const blink = REDUCED ? 1 : (Math.sin(now / 180) + 1) / 2;
+    ctx.fillStyle = rgba(COL.lead, 0.35 + 0.65 * blink);
+    ctx.beginPath(); ctx.arc(0, 9, 2.2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawPlanet(ringAlpha) {
+    const P = S.PLANET, cx = X(P.x), cy = Y(P.y), r = P.r * Z();
     // target orbit
     ctx.save();
     ctx.setLineDash([3, 9]);
-    ctx.strokeStyle = rgba(COL.lead, 0.45); ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.arc(cx, cy, sc.orbitR * view.s, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = rgba(COL.lead, ringAlpha); ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(cx, cy, sc.orbitR * Z(), 0, Math.PI * 2); ctx.stroke();
     ctx.restore();
     // atmosphere glow, then the planet lit from the upper left
     const glow = ctx.createRadialGradient(cx, cy, r * 0.9, cx, cy, r * 1.9);
@@ -276,12 +355,12 @@
     // asteroids
     for (const r of rocks) {
       ctx.save();
-      ctx.translate(X(r.c.x), Y(r.c.y)); ctx.scale(view.s, view.s);
+      ctx.translate(X(r.c.x), Y(r.c.y)); ctx.scale(Z(), Z());
       ctx.beginPath();
       r.pts.forEach((p, i) => ctx[i ? 'lineTo' : 'moveTo'](p[0], p[1]));
       ctx.closePath();
       ctx.fillStyle = '#1b1f2a'; ctx.fill();
-      ctx.lineWidth = 2 / view.s; ctx.strokeStyle = '#4a5163'; ctx.stroke();
+      ctx.lineWidth = 2 / Z(); ctx.strokeStyle = '#4a5163'; ctx.stroke();
       ctx.restore();
     }
 
@@ -299,11 +378,14 @@
       ctx.fillStyle = COL.lead; ctx.fillRect(x0, gy - 2, x1 - x0, 4);
       ctx.restore();
     } else if (task === 'orbit') {
-      drawPlanet();
+      drawPlanet(0.45);
+    } else if (task === 'dock') {
+      drawPlanet(0.16);
+      drawStation(alpha, now);
     } else {
       // beacon or cursor target
       const t = sc.override, pulse = REDUCED ? 0.5 : (Math.sin(now / 240) + 1) / 2;
-      const tx = X(t.x), ty = Y(t.y), R = S.REACH_R * view.s;
+      const tx = X(t.x), ty = Y(t.y), R = S.REACH_R * Z();
       ctx.save();
       ctx.shadowColor = COL.lead; ctx.shadowBlur = 20;
       ctx.strokeStyle = rgba(COL.lead, 0.9); ctx.lineWidth = 2;
@@ -328,16 +410,17 @@
       }
     }
 
-    // sensors on the lead ship
-    const lead = fleet[0];
-    if (lead && lead.ship.alive && task === 'field') {
+    // range-finder rays of the watched ship (always in the field, in every task while following)
+    const seen = watched();
+    if (seen && seen.ship.alive && (task === 'field' || follow >= 0)) {
+      const s = seen.ship, [sx, sy] = lerpPos(seen, alpha);
       S.RAYS.forEach((off, i) => {
-        const a = lead.ship.a + off, len = lead.ship.rays[i] * S.RAY_LEN;
-        ctx.strokeStyle = rgba(lead.ship.rays[i] < 0.5 ? COL.red : COL.lead, 0.28);
+        const a = s.a + off, len = s.rays[i] * S.RAY_LEN;
+        ctx.strokeStyle = rgba(s.rays[i] < 0.5 ? COL.red : COL.lead, follow >= 0 ? 0.45 : 0.28);
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(X(lead.ship.x), Y(lead.ship.y));
-        ctx.lineTo(X(lead.ship.x + Math.cos(a) * len), Y(lead.ship.y + Math.sin(a) * len));
+        ctx.moveTo(X(sx), Y(sy));
+        ctx.lineTo(X(sx + Math.cos(a) * len), Y(sy + Math.sin(a) * len));
         ctx.stroke();
       });
     }
@@ -355,14 +438,19 @@
       r.r += 3; r.life -= 0.04;
       if (r.life <= 0) { rings.splice(i, 1); continue; }
       ctx.strokeStyle = rgba(r.color, r.life); ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(X(r.x), Y(r.y), r.r * view.s, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(X(r.x), Y(r.y), r.r * Z(), 0, Math.PI * 2); ctx.stroke();
     }
     ctx.globalCompositeOperation = 'source-over';
 
-    // ships, lead on top
+    // ships, lead on top, the followed ship above everything
     for (let i = fleet.length - 1; i >= 0; i--) {
       const f = fleet[i];
+      if (i !== follow && (f.ship.alive || f.ship.landed)) drawShip(f, alpha);
+    }
+    const f = fleet[follow];
+    if (f) {
       if (f.ship.alive || f.ship.landed) drawShip(f, alpha);
+      drawFocus(f, alpha);
     }
   }
 
@@ -371,8 +459,11 @@
     hunt:  { label: 'beacons / run', get: (h) => h.reached.toFixed(1) },
     field: { label: 'survival',      get: (h) => Math.round((1 - h.crashed) * 100) + '%' },
     land:  { label: 'safe landings', get: (h) => Math.round(h.landed * 100) + '%' },
-    orbit: { label: 'orbits / run',  get: (h) => (h.orbits || 0).toFixed(2) }
+    orbit: { label: 'orbits / run',  get: (h) => (h.orbits || 0).toFixed(2) },
+    dock:  { label: 'docked',        get: (h) => Math.round(h.landed * 100) + '%' }
   };
+
+  const shipName = (i) => (i === 0 ? 'the lead ship' : `ship ${i + 1}`);
 
   function generationCap(tr) {
     const struggling = task === 'land' && (!tr.bestHoldout || tr.bestHoldout.landed < 0.75);
@@ -383,7 +474,9 @@
     if (tr.python) return true;
     const h = tr.history[tr.history.length - 1];
     if (!h) return false;
-    return task === 'land' ? h.landed >= 0.6 : tr.generation >= TRAINED_AT;
+    if (task === 'land') return h.landed >= 0.6;
+    if (task === 'dock') return h.landed >= 0.35 || tr.generation >= 3 * TRAINED_AT;
+    return tr.generation >= TRAINED_AT;
   }
 
   function updateReadouts() {
@@ -406,14 +499,23 @@
     let msg;
     if (status === 'loading') msg = 'Loading the brain trained in Python…';
     else if (status === 'failed') msg = 'Could not load the Python-trained brain. Showing live training instead.';
+    else if (follow >= 0) msg = `Riding along with ${shipName(follow)}. ` + (TOUCH ? 'Tap it again to let go.' : 'Click it again or press Esc to let go.');
     else if (scrubGen !== null) msg = `Rewound to ${unit} ${tr.python ? tr.at[gen] : gen}. This is how they flew back then.`;
     else if (!isReady(tr)) msg = 'Still learning the controls. Give them a few seconds.';
     else if (task === 'hunt') msg = TOUCH ? 'Tap the sky. They will chase it.' : 'Move your cursor. They will chase it.';
     else if (task === 'field') msg = (TOUCH ? 'Tap' : 'Click') + ' to drop an asteroid in their way.';
     else if (task === 'orbit') msg = (TOUCH ? 'Tap' : 'Move your cursor') + ' to raise or lower their orbit.';
+    else if (task === 'dock') msg = 'They have to match the station’s orbit, then touch it gently.';
     else msg = TOUCH ? 'Tap the sky to move the landing pad.' : 'Move your cursor to slide the landing pad.';
-    if (tr.python && scrubGen === null) msg = `${tr.algo.toUpperCase()}, trained in Python. ${msg}`;
+    if (follow < 0 && scrubGen === null && status !== 'loading' && status !== 'failed' && isReady(tr)) {
+      msg += TOUCH ? ' Tap a ship to ride along.' : ' Click a ship to ride along.';
+    }
+    if (tr.python && scrubGen === null && follow < 0) msg = `${tr.algo.toUpperCase()}, trained in Python. ${msg}`;
     if ($('hint').textContent !== msg) $('hint').textContent = msg;
+
+    const label = `${follow > 0 ? shipName(follow) : 'lead ship'}’s brain`;
+    if ($('net-label').textContent !== label) $('net-label').textContent = label;
+    $('unfollow').hidden = follow < 0;
 
     drawChart(tr, gen);
   }
@@ -437,16 +539,32 @@
     }
   }
 
-  // Live view of the lead ship's network: nodes glow with activation.
+  // Live view of the watched ship's network: nodes glow with activation.
+  const MONO = getComputedStyle(document.documentElement).getPropertyValue('--mono').trim() || 'monospace';
+  const IN_GROUPS = [['target', 0, 2], ['velocity', 3, 4], ['spin', 5, 5], ['heading', 6, 7], ['rays', 8, 12]];
+  const OUT_NAMES = ['thrust', 'turn'];
   function drawNet() {
     const w = net.clientWidth, h = net.clientHeight;
-    if (!w || !fleet[0]) return;
+    if (!w || !watched()) return;
     nctx.clearRect(0, 0, w, h);
     netMax = Math.max(netPeak, 1e-6); netPeak = 0;
-    const { p, layers: cols } = fleet[0].brain, L = cols.length;
+    const { p, layers: cols } = watched().brain, L = cols.length;
     if (trace.length !== L) return;
-    const xs = cols.map((_, c) => 8 + ((w - 16) * c) / (L - 1));
+    const padL = 56, padR = 38;
+    const xs = cols.map((_, c) => padL + ((w - padL - padR) * c) / (L - 1));
     const nodeY = (c, i) => (h * (i + 0.5)) / cols[c];
+
+    nctx.font = `8.5px ${MONO}`;
+    nctx.textBaseline = 'middle';
+    nctx.fillStyle = nctx.strokeStyle = rgba(COL.ink, 0.42);
+    nctx.textAlign = 'right';
+    for (const [name, a, b] of IN_GROUPS) {
+      const y0 = nodeY(0, a), y1 = nodeY(0, b);
+      nctx.fillText(name, padL - 10, (y0 + y1) / 2);
+      if (b > a) { nctx.beginPath(); nctx.moveTo(padL - 6, y0); nctx.lineTo(padL - 6, y1); nctx.stroke(); }
+    }
+    nctx.textAlign = 'left';
+    OUT_NAMES.forEach((name, i) => nctx.fillText(name, xs[L - 1] + 7, nodeY(L - 1, i)));
     let k = 0;
     nctx.lineWidth = 1;
     for (let l = 1; l < L; l++) {
@@ -480,7 +598,7 @@
   document.querySelectorAll('#tasks button').forEach((b) => b.addEventListener('click', () => {
     if (task === b.dataset.task) return;
     task = b.dataset.task;
-    scrubGen = null;
+    scrubGen = null; follow = -1;
     document.querySelectorAll('#tasks button').forEach((x) => x.classList.toggle('on', x === b));
     if (mode === 'python') loadPython(task);
     startWave(); updateReadouts();
@@ -507,21 +625,40 @@
   });
   $('live').addEventListener('click', () => { scrubGen = null; startWave(); updateReadouts(); });
 
+  $('unfollow').addEventListener('click', () => setFollow(-1));
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && follow >= 0) setFollow(-1); });
+
   function toWorld(e) {
     const r = cv.getBoundingClientRect();
-    return [(e.clientX - r.left - view.ox) / view.s, (e.clientY - r.top - view.oy) / view.s];
+    const sx = (e.clientX - r.left - view.ox) / view.s, sy = (e.clientY - r.top - view.oy) / view.s;
+    return [cam.x + (sx - S.W / 2) / cam.z, cam.y + (sy - S.H / 2) / cam.z];
+  }
+  // The ship under the pointer (generous, since they move), or -1.
+  function shipAt(e) {
+    const r = cv.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
+    let best = -1, bestD = TOUCH ? 34 : 26;
+    fleet.forEach((f, i) => {
+      if (!f.ship.alive && !f.ship.landed) return;
+      const d = Math.hypot(X(f.ship.x) - sx, Y(f.ship.y) - sy);
+      if (d < bestD) { bestD = d; best = i; }
+    });
+    return best;
   }
   const overUi = (e) => e.target.closest && e.target.closest('.panel, a, button, input');
   function aim(e) {
-    if (overUi(e)) { pointer.at = -1e9; return; }
+    if (overUi(e)) { pointer.at = -1e9; hero.style.cursor = ''; return; }
     [pointer.x, pointer.y] = toWorld(e);
     pointer.at = performance.now();
+    if (e.pointerType === 'mouse') hero.style.cursor = shipAt(e) >= 0 ? 'pointer' : '';
   }
   hero.addEventListener('pointermove', aim);
   hero.addEventListener('pointerdown', aim);
   hero.addEventListener('pointerleave', () => { pointer.at = -1e9; });
   hero.addEventListener('click', (e) => {
-    if (task !== 'field' || overUi(e)) return;
+    if (overUi(e)) return;
+    const hit = shipAt(e);
+    if (hit >= 0) { setFollow(hit === follow ? -1 : hit); return; }
+    if (task !== 'field') return;
     const [x, y] = toWorld(e);
     if (x < 0 || y < 0 || x > S.W || y > S.H) return;
     const c = { x, y, r: rand(38, 62) };
@@ -551,7 +688,9 @@
       acc += elapsed / 1000;
       while (acc >= S.DT) { tick(); acc -= S.DT; }
     }
-    draw(running ? acc / S.DT : 1, now);
+    const alpha = running ? acc / S.DT : 1;
+    updateCamera(elapsed / 1000, alpha);
+    draw(alpha, now);
     if (frame % 3 === 0) drawNet();
     if (frame % 12 === 0) updateReadouts();
     frame++;

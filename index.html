@@ -50,6 +50,7 @@
       <button type="button" data-task="field">Asteroid field</button>
       <button type="button" data-task="land">Land</button>
       <button type="button" data-task="orbit">Orbit</button>
+      <button type="button" data-task="dock">Dock</button>
     </div>
     <div class="seg">
       <button type="button" id="pause">Pause</button>
@@ -73,7 +74,10 @@
       <button type="button" id="live" hidden>live</button>
     </label>
     <div class="netwrap">
-      <span>lead ship&#8217;s brain</span>
+      <div class="nethead">
+        <span id="net-label">lead ship&#8217;s brain</span>
+        <button type="button" id="unfollow" hidden>let go</button>
+      </div>
       <canvas id="net"></canvas>
     </div>
   </aside>
