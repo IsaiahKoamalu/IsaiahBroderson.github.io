@@ -45,14 +45,25 @@
   <p class="hint" id="hint" aria-live="polite"></p>
 
   <div class="dock panel">
-    <div class="seg" id="tasks" role="group" aria-label="Task">
-      <button type="button" data-task="hunt" class="on">Hunt</button>
-      <button type="button" data-task="field">Asteroid field</button>
-      <button type="button" data-task="land">Land</button>
+    <div class="row">
+      <div class="seg" id="tasks" role="group" aria-label="Task">
+        <button type="button" data-task="hunt" class="on">Hunt</button>
+        <button type="button" data-task="field">Asteroid field</button>
+        <button type="button" data-task="land">Land</button>
+      </div>
+      <div class="seg">
+        <button type="button" id="pause">Pause</button>
+        <button type="button" id="restart">Start over</button>
+      </div>
     </div>
-    <div class="seg">
-      <button type="button" id="pause">Pause</button>
-      <button type="button" id="restart">Start over</button>
+    <div class="row tools-row">
+      <div class="seg" id="tools" role="group" aria-label="What your clicks do"></div>
+      <label class="grav">
+        <span>gravity</span>
+        <input type="range" id="gravity" min="0" max="260" step="10" value="0" aria-label="Gravity">
+        <b id="grav-val">off</b>
+      </label>
+      <div class="seg"><button type="button" id="clear">Clear</button></div>
     </div>
   </div>
 

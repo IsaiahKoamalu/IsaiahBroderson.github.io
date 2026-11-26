@@ -31,8 +31,14 @@
   const trainers = {};
   const trainer = () => trainers[task] || (trainers[task] = new S.Trainer(task));
 
-  let sc, fleet = [], particles = [], rings = [], rocks = [], userRocks = [];
+  let sc, fleet = [], particles = [], rings = [], rocks = [];
   let beacon = null, beaconIdx = 0, waveT = 0, doneT = 0;
+
+  // What a click does. Each task offers the changes its ships can learn to cope with.
+  const TOOLS = { hunt: ['chase', 'route'], field: ['rock', 'wall'], land: ['pad', 'rock', 'wall'] };
+  const TOOL_LABEL = { chase: 'Chase', route: 'Route', rock: 'Rocks', wall: 'Walls', pad: 'Pad' };
+  const MAX_ROCKS = 10, MAX_WALLS = 6, MAX_ROUTE = 6;
+  let tool = 'chase', route = [], draft = null;
   const trace = {
     input: new Float64Array(S.N_IN), hidden: new Float64Array(S.N_HID), output: new Float64Array(S.N_OUT)
   };
@@ -79,14 +85,16 @@
   const Y = (y) => view.oy + y * view.s;
 
   // ---------- Waves: each one flies the newest brains ----------
-  function buildRock(c) {
+  function buildRock(c, user) {
     const pts = [], n = 11, seed = Math.floor(c.x * 7 + c.y * 13);
     for (let i = 0; i < n; i++) {
       const wob = 0.82 + (Math.abs(Math.sin(seed + i * 2.4)) * 0.22);
       pts.push([Math.cos((i / n) * Math.PI * 2) * c.r * wob, Math.sin((i / n) * Math.PI * 2) * c.r * wob]);
     }
-    return { c, pts };
+    return { c, pts, user };
   }
+  const buildRocks = () => { const mine = trainer().world.rocks; rocks = sc.asteroids.map((c) => buildRock(c, mine.includes(c))); };
+  const beacons = () => (task === 'hunt' && route.length ? route : sc.targets);
 
   function fleetSize() { return view.w < 700 ? 14 : 28; }
 
@@ -94,13 +102,12 @@
     const tr = trainer();
     const gen = scrubGen === null ? tr.generation : scrubGen;
     const mean = tr.snapshots[gen];
-    sc = S.makeScenario(task, (Math.random() * 1e9) | 0);
-    sc.asteroids = sc.asteroids.concat(task === 'field' ? userRocks : []);
-    rocks = sc.asteroids.map(buildRock);
-    if (task === 'land' && pointerActive()) movePad(pointer.x);
+    sc = S.makeScenario(task, (Math.random() * 1e9) | 0, tr.world);
+    buildRocks();
+    if (task === 'land' && tool === 'pad' && pointerActive()) movePad(pointer.x);
 
     beaconIdx = 0;
-    beacon = sc.targets[0];
+    beacon = beacons()[0];
     sc.override = task === 'land' ? null : beacon;
     waveT = 0; doneT = 0;
 
@@ -137,8 +144,8 @@
   // ---------- Simulation tick (30 Hz) ----------
   function tick() {
     if (task === 'land') {
-      if (pointerActive()) movePad(pointer.x);
-    } else if (pointerActive()) {
+      if (tool === 'pad' && pointerActive()) movePad(pointer.x);
+    } else if (tool === 'chase' && pointerActive()) {
       sc.override = { x: clamp(pointer.x, 30, S.W - 30), y: clamp(pointer.y, 30, S.H - 30) };
     } else {
       sc.override = beacon;
@@ -169,8 +176,9 @@
       if (hit) {
         rings.push({ x: beacon.x, y: beacon.y, r: S.REACH_R, life: 1, color: COL.lead });
         burst(beacon.x, beacon.y, COL.lead, 14, 4);
-        beaconIdx = (beaconIdx + 1) % sc.targets.length;
-        beacon = sc.targets[beaconIdx];
+        const list = beacons();
+        beaconIdx = (beaconIdx + 1) % list.length;
+        beacon = list[beaconIdx];
       }
     }
 
@@ -219,8 +227,36 @@
       r.pts.forEach((p, i) => ctx[i ? 'lineTo' : 'moveTo'](p[0], p[1]));
       ctx.closePath();
       ctx.fillStyle = '#1b1f2a'; ctx.fill();
-      ctx.lineWidth = 2 / view.s; ctx.strokeStyle = '#4a5163'; ctx.stroke();
+      ctx.lineWidth = 2 / view.s; ctx.strokeStyle = r.user ? rgba(COL.lead, 0.55) : '#4a5163'; ctx.stroke();
       ctx.restore();
+    }
+
+    // walls the visitor drew, plus the one being drawn
+    ctx.lineCap = 'round';
+    for (const w of sc.walls) {
+      const line = () => { ctx.beginPath(); ctx.moveTo(X(w.x1), Y(w.y1)); ctx.lineTo(X(w.x2), Y(w.y2)); ctx.stroke(); };
+      ctx.strokeStyle = rgba(COL.lead, 0.55); ctx.lineWidth = (S.WALL_R * 2 + 2) * view.s; line();
+      ctx.strokeStyle = '#1b1f2a'; ctx.lineWidth = Math.max(1, (S.WALL_R * 2 - 2) * view.s); line();
+    }
+    if (draft) {
+      ctx.save();
+      ctx.setLineDash([8, 8]); ctx.strokeStyle = rgba(COL.lead, 0.8); ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(X(draft.x1), Y(draft.y1)); ctx.lineTo(X(draft.x2), Y(draft.y2)); ctx.stroke();
+      ctx.restore();
+    }
+
+    // the route the visitor laid out
+    if (task === 'hunt' && route.length) {
+      ctx.strokeStyle = rgba(COL.lead, 0.18); ctx.lineWidth = 1; ctx.setLineDash([4, 6]);
+      ctx.beginPath();
+      route.forEach((p, i) => ctx[i ? 'lineTo' : 'moveTo'](X(p.x), Y(p.y)));
+      if (route.length > 2) ctx.closePath();
+      ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = rgba(COL.lead, 0.45); ctx.font = '11px "JetBrains Mono", monospace'; ctx.textAlign = 'center';
+      route.forEach((p, i) => {
+        ctx.beginPath(); ctx.arc(X(p.x), Y(p.y), 3, 0, Math.PI * 2); ctx.fill();
+        ctx.fillText(String(i + 1), X(p.x), Y(p.y) - 10);
+      });
     }
 
     // ground + landing pad
@@ -304,14 +340,41 @@
 
   // ---------- Training readouts ----------
   const METRIC = {
-    hunt:  { label: 'beacons / run', get: (h) => h.reached.toFixed(1) },
-    field: { label: 'survival',      get: (h) => Math.round((1 - h.crashed) * 100) + '%' },
-    land:  { label: 'safe landings', get: (h) => Math.round(h.landed * 100) + '%' }
+    hunt:  { label: 'beacons / run', name: 'beacons per run', get: (h) => h.reached.toFixed(1) },
+    field: { label: 'survival',      name: 'survival',        get: (h) => Math.round((1 - h.crashed) * 100) + '%' },
+    land:  { label: 'safe landings', name: 'safe landings',   get: (h) => Math.round(h.landed * 100) + '%' }
   };
 
   function generationCap(tr) {
     const struggling = task === 'land' && (!tr.bestHoldout || tr.bestHoldout.landed < 0.75);
-    return struggling ? MAX_IF_STRUGGLING : MAX_GENERATIONS;
+    return Math.max(struggling ? MAX_IF_STRUGGLING : MAX_GENERATIONS, tr.adaptUntil);
+  }
+
+  // Narrates what the visitor's last change did to the fleet, and how the fleet recovered.
+  function changeMessage(tr) {
+    const c = tr.change, M = METRIC[task];
+    if (!c || !c.before || scrubGen !== null) return null;
+    const since = tr.generation - c.gen;
+    if (c.easy) return since < 40 ? `They can already handle that: ${M.name} ${M.get(c.after)}.` : null;
+    if (c.done) {
+      const n = c.done === 1 ? '1 generation' : `${c.done} generations`;
+      return since - c.done < 60 ? `Adapted in ${n}: ${M.name} back to ${M.get(tr.bestHoldout)} (was ${M.get(c.before)}).` : null;
+    }
+    if (tr.generation < tr.adaptUntil) {
+      return `Your change knocked ${M.name} down from ${M.get(c.before)}. Adapting… ${M.get(tr.bestHoldout)} now.`;
+    }
+    return since < tr.adaptUntil - c.gen + 60 ? `That one is hard. Best so far: ${M.name} ${M.get(tr.bestHoldout)} (was ${M.get(c.before)}).` : null;
+  }
+
+  function toolHint() {
+    const verb = TOUCH ? 'Tap' : 'Click';
+    switch (tool) {
+      case 'chase': return TOUCH ? 'Tap the sky. They will chase it.' : 'Move your cursor. They will chase it.';
+      case 'route': return `${verb} to lay out a route of up to ${MAX_ROUTE} beacons.`;
+      case 'rock': return `${verb} to drop an asteroid in their way. They will learn to avoid it.`;
+      case 'wall': return 'Drag to draw a wall. They will learn to fly around it.';
+      default: return TOUCH ? 'Tap the sky to move the landing pad.' : 'Move your cursor to slide the landing pad.';
+    }
   }
 
   function isReady(tr) {
@@ -334,10 +397,7 @@
 
     let msg;
     if (scrubGen !== null) msg = `Rewound to generation ${scrubGen}. This is how they flew back then.`;
-    else if (!isReady(tr)) msg = 'Still learning the controls. Give them a few seconds.';
-    else if (task === 'hunt') msg = TOUCH ? 'Tap the sky. They will chase it.' : 'Move your cursor. They will chase it.';
-    else if (task === 'field') msg = (TOUCH ? 'Tap' : 'Click') + ' to drop an asteroid in their way.';
-    else msg = TOUCH ? 'Tap the sky to move the landing pad.' : 'Move your cursor to slide the landing pad.';
+    else msg = changeMessage(tr) || (isReady(tr) ? toolHint() : 'Still learning the controls. Give them a few seconds.');
     if ($('hint').textContent !== msg) $('hint').textContent = msg;
 
     drawChart(tr, gen);
@@ -402,18 +462,71 @@
     running = r;
     $('pause').textContent = r ? 'Pause' : 'Resume';
   }
+  const gravityOf = (tr) => (tr.world.gravity == null ? S.TASKS[task].gravity : tr.world.gravity);
+  function showGravity(g) {
+    $('grav-val').textContent = g ? (g / S.GRAVITY).toFixed(1) + '×' : 'off';
+  }
+  function setTool(t) {
+    tool = t;
+    draft = null;
+    document.querySelectorAll('#tools button').forEach((x) => x.classList.toggle('on', x.dataset.tool === t));
+    // drawing a wall on a phone must not scroll the page
+    wrap.style.touchAction = t === 'wall' ? 'none' : '';
+    updateReadouts();
+  }
+  function buildTools() {
+    const box = $('tools');
+    box.innerHTML = '';
+    for (const t of TOOLS[task]) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.dataset.tool = t; b.textContent = TOOL_LABEL[t];
+      b.addEventListener('click', () => setTool(t));
+      box.appendChild(b);
+    }
+    const g = gravityOf(trainer());
+    $('gravity').value = g; showGravity(g);
+    setTool(TOOLS[task][0]);
+  }
+
+  // Apply a change to the world: training adapts to it, and the ships flying now meet it immediately.
+  function changeWorld(edit) {
+    const tr = trainer(), old = tr.world;
+    const w = { rocks: old.rocks.slice(), walls: old.walls.slice(), gravity: old.gravity };
+    edit(w);
+    tr.setWorld(w);
+    scrubGen = null;
+    sc.asteroids = sc.asteroids.filter((a) => !old.rocks.includes(a)).concat(tr.world.rocks);
+    sc.walls = tr.world.walls.slice();
+    sc.gravity = gravityOf(tr);
+    buildRocks();
+    updateReadouts();
+  }
+
   document.querySelectorAll('#tasks button').forEach((b) => b.addEventListener('click', () => {
     if (task === b.dataset.task) return;
     task = b.dataset.task;
     scrubGen = null;
     document.querySelectorAll('#tasks button').forEach((x) => x.classList.toggle('on', x === b));
-    startWave(); updateReadouts();
+    startWave(); buildTools(); updateReadouts();
   }));
   $('pause').addEventListener('click', () => setRunning(!running));
   $('restart').addEventListener('click', () => {
     delete trainers[task];
-    scrubGen = null; userRocks = [];
-    startWave(); updateReadouts();
+    scrubGen = null; route = [];
+    startWave(); buildTools(); updateReadouts();
+  });
+  $('clear').addEventListener('click', () => {
+    route = [];
+    beaconIdx = 0; beacon = beacons()[0];
+    const w = trainer().world;
+    if (w.rocks.length || w.walls.length || w.gravity != null) changeWorld((x) => { x.rocks = []; x.walls = []; x.gravity = null; });
+    const g = gravityOf(trainer());
+    $('gravity').value = g; showGravity(g);
+  });
+  $('gravity').addEventListener('input', (e) => showGravity(+e.target.value));
+  $('gravity').addEventListener('change', (e) => {
+    const g = +e.target.value;
+    changeWorld((w) => { w.gravity = g === S.TASKS[task].gravity ? null : g; });
   });
   $('scrub').addEventListener('input', (e) => {
     const v = +e.target.value;
@@ -432,23 +545,39 @@
     [pointer.x, pointer.y] = toWorld(e);
     pointer.at = performance.now();
   }
-  hero.addEventListener('pointermove', aim);
-  hero.addEventListener('pointerdown', aim);
-  hero.addEventListener('pointerleave', () => { pointer.at = -1e9; });
-  hero.addEventListener('click', (e) => {
-    if (task !== 'field' || overUi(e)) return;
-    const [x, y] = toWorld(e);
-    if (x < 0 || y < 0 || x > S.W || y > S.H) return;
-    const c = { x, y, r: rand(38, 62) };
-    userRocks.push(c);
-    if (userRocks.length > 10) {
-      const old = userRocks.shift();
-      sc.asteroids = sc.asteroids.filter((a) => a !== old);
-      rocks = rocks.filter((r) => r.c !== old);
-    }
-    sc.asteroids.push(c);
-    rocks.push(buildRock(c));
+  const inWorld = (x, y) => x >= 0 && y >= 0 && x <= S.W && y <= (task === 'land' ? S.GROUND - 30 : S.H);
+  hero.addEventListener('pointermove', (e) => {
+    aim(e);
+    if (draft) [draft.x2, draft.y2] = toWorld(e);
   });
+  hero.addEventListener('pointerleave', () => { pointer.at = -1e9; });
+  hero.addEventListener('pointerdown', (e) => {
+    aim(e);
+    if (overUi(e) || e.button > 0) return;
+    const [x, y] = toWorld(e);
+    if (!inWorld(x, y)) return;
+    if (tool === 'rock') {
+      changeWorld((w) => { w.rocks.push({ x, y, r: rand(38, 62) }); if (w.rocks.length > MAX_ROCKS) w.rocks.shift(); });
+    } else if (tool === 'wall') {
+      draft = { x1: x, y1: y, x2: x, y2: y };
+      hero.setPointerCapture?.(e.pointerId);
+    } else if (tool === 'route') {
+      route.push({ x: clamp(x, 40, S.W - 40), y: clamp(y, 40, S.H - 40) });
+      if (route.length > MAX_ROUTE) route.shift();
+      beaconIdx = route.length - 1; beacon = route[beaconIdx];
+      sc.override = beacon;
+    }
+  });
+  const finishWall = () => {
+    if (!draft) return;
+    const d = draft;
+    draft = null;
+    d.x2 = clamp(d.x2, 0, S.W); d.y2 = clamp(d.y2, 0, task === 'land' ? S.GROUND - 30 : S.H);
+    if (Math.hypot(d.x2 - d.x1, d.y2 - d.y1) < 50) return;
+    changeWorld((w) => { w.walls.push(d); if (w.walls.length > MAX_WALLS) w.walls.shift(); });
+  };
+  hero.addEventListener('pointerup', finishWall);
+  hero.addEventListener('pointercancel', () => { draft = null; });
 
   // ---------- Main loop ----------
   new IntersectionObserver(([e]) => { onscreen = e.isIntersecting; }).observe(hero);
@@ -474,6 +603,7 @@
 
   resize();
   startWave();
+  buildTools();
   setRunning(running);
   updateReadouts();
   window.addEventListener('resize', resize);

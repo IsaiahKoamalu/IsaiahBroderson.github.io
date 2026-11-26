@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Isaiah Broderson — CS & Machine Learning</title>
+<meta name="description" content="Isaiah Broderson — computer science student building engines, simulations, and machine learning tools.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;900&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="flight.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a href="#" class="logo">IB</a>
+    <div class="links">
+      <a href="#about">about</a>
+      <a href="#experience">experience</a>
+      <a href="#projects">projects</a>
+      <a href="#coursework">coursework</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ============ HERO: a fleet learning to fly, live ============ -->
+<header class="hero" id="hero">
+  <div class="skywrap" id="skywrap">
+    <canvas id="sky" role="img" aria-label="A fleet of small ships controlled by neural networks learning to fly, trained live in your browser."></canvas>
+  </div>
+
+  <div class="intro">
+    <div class="eyebrow">CS · B.S. — University of Hawai&#699;i at Hilo</div>
+    <h1>Isaiah<br>Broderson</h1>
+    <p class="tagline">I am passionate about building engines and simulations and applying machine/reinforcement learning to them to help solve real world problems. These ships started out knowing nothing when you loaded this website.</p>
+    <div class="hero-links">
+      <a class="primary" href="#projects">View projects</a>
+      <a href="https://github.com/IsaiahKoamalu" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://www.linkedin.com/in/isaiah-broderson-3b34492a6" target="_blank" rel="noopener">LinkedIn</a>
+      <a href="mailto:isaiahkb@hawaii.edu">Email</a>
+    </div>
+  </div>
+
+  <p class="hint" id="hint" aria-live="polite"></p>
+
+  <div class="dock panel">
+    <div class="row">
+      <div class="seg" id="tasks" role="group" aria-label="Task">
+        <button type="button" data-task="hunt" class="on">Hunt</button>
+        <button type="button" data-task="field">Asteroid field</button>
+        <button type="button" data-task="land">Land</button>
+      </div>
+      <div class="seg">
+        <button type="button" id="pause">Pause</button>
+        <button type="button" id="restart">Start over</button>
+      </div>
+    </div>
+    <div class="row tools-row">
+      <div class="seg" id="tools" role="group" aria-label="What your clicks do"></div>
+      <label class="grav">
+        <span>gravity</span>
+        <input type="range" id="gravity" min="0" max="260" step="10" value="0" aria-label="Gravity">
+        <b id="grav-val">off</b>
+      </label>
+      <div class="seg"><button type="button" id="clear">Clear</button></div>
+    </div>
+  </div>
+
+  <aside class="console panel" aria-label="Training progress">
+    <div class="readout">
+      <div><span>generation</span><b id="gen">0</b></div>
+      <div><span id="metric-label">beacons / run</span><b id="metric">0</b></div>
+    </div>
+    <canvas id="chart"></canvas>
+    <label class="scrub">
+      <span>rewind training</span>
+      <input type="range" id="scrub" min="0" max="0" value="0" aria-label="Rewind to an earlier generation">
+      <button type="button" id="live" hidden>live</button>
+    </label>
+    <div class="netwrap">
+      <span>lead ship&#8217;s brain</span>
+      <canvas id="net"></canvas>
+    </div>
+  </aside>
+</header>
+
+<div class="wrap">
+
+  <!-- ============ ABOUT ============ -->
+  <section id="about" class="reveal">
+    <div class="section-head">
+      <span class="num">01</span>
+      <h2>About</h2>
+      <span class="rule"></span>
+    </div>
+    <div class="about">
+      <p>I&#8217;m a second-year computer science student at the <strong>University of Hawai&#699;i at Hilo</strong>, drawn to the places where computing and astronomy meet &mdash; simulating physical systems, building engines and computational tools, and applying machine learning to real scientific data. My goal is to work on projects that meaningfully combine the two and contribute to scientific and technical advancement.</p>
+    </div>
+  </section>
+
+  <!-- ============ EXPERIENCE ============ -->
+  <section id="experience" class="reveal">
+    <div class="section-head">
+      <span class="num">02</span>
+      <h2>Research &amp; Experience</h2>
+      <span class="rule"></span>
+    </div>
+    <ol class="timeline">
+      <li class="entry">
+        <div class="pos"><span class="t">t = 0</span><span class="date">Summer 2026</span></div>
+        <div>
+          <div class="role">ML Telescope Pointing Model &mdash; NOIRLab / Gemini Observatory</div>
+          <div class="desc">Building a machine-learning pointing model that learns from historical telescope telemetry to predict optimal offsets after a slew &mdash; reducing manual adjustment, speeding target acquisition, and yielding more observing time.</div>
+        </div>
+      </li>
+      <li class="entry">
+        <div class="pos"><span class="t">t = 1</span><span class="date">Spring 2026 — Present</span><span class="badge">active</span></div>
+        <div>
+          <div class="role">HSGC Research Intern &mdash; NASA-funded (Awarded Extension)</div>
+          <div class="desc">Self-proposed research: &ldquo;Building Neural Networks for the Classification of Stellar Parameters using Spectra.&rdquo; Developed and trained a transformer model on Gaia spectral data to automate extraction of stellar parameters across millions of spectra. Awarded an extension through Fall 2026.</div>
+        </div>
+      </li>
+      <li class="entry">
+        <div class="pos"><span class="t">t = 2</span><span class="date">Fall 2025 — Spring 2026</span></div>
+        <div>
+          <div class="role">Programming Research Intern &mdash; Human-in-the-Loop AI</div>
+          <div class="desc">Researched how people work most effectively with AI systems and built metrics capturing how well AI helps the user. Focused on Robust Confidence Tracking (RCT), an offline multi-object tracking algorithm for poor-detection settings. Worked front-end and back-end across Unity, C#, and Python.</div>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ============ PROJECTS ============ -->
+  <section id="projects" class="reveal">
+    <div class="section-head">
+      <span class="num">03</span>
+      <h2>Projects</h2>
+      <span class="rule"></span>
+    </div>
+    <div class="grid">
+      <a class="card featured" href="https://github.com/IsaiahKoamalu/NeuroPoint" target="_blank" rel="noopener">
+        <div class="title">NeuroPoint</div>
+        <div class="blurb">A causal transformer that predicts telescope pointing corrections for Gemini North, learning within-night drift from slew history. Includes a 423-config neural architecture search and a zero-risk shadow-mode evaluation harness. Built during the Akamai Internship at NOIRLab.</div>
+        <div class="tags"><span class="tag">Python</span><span class="tag">PyTorch</span><span class="tag">Transformers</span><span class="tag">ML</span></div>
+      </a>
+      <a class="card" href="https://isaiahkoamalu.github.io/iskobrEngine/" target="_blank" rel="noopener">
+        <div class="title">Handoff Failure</div>
+        <div class="blurb">Measuring and trying to improve upon the handoff failure between separatley trained reinforcement learning skills. All RL training done within a custom solarsystem simulation environment.</div>
+        <div class="tags"><span class="tag">Python</span><span class="tag">GDScript</span><span class="tag">Godot</span></div>
+      </a>
+      <a class="card" href="https://isaiahkoamalu.github.io/iskobrEngine/" target="_blank" rel="noopener">
+        <div class="title">Iskobr Engine</div>
+        <div class="blurb">A custom 2D engine with modular systems for rendering, animation, physics, and pathfinding, plus a JSON-driven tilemap and entity loader.</div>
+        <div class="tags"><span class="tag">C++</span><span class="tag">SFML</span><span class="tag">GLM</span></div>
+      </a>
+      <a class="card" href="https://github.com/IsaiahKoamalu/OpenGL-SpaceSim" target="_blank" rel="noopener">
+        <div class="title">OpenGL Solar System</div>
+        <div class="blurb">A 3D solar system simulation written from scratch with a realistic custom orbital-mechanics system, custom shaders, and lighting.</div>
+        <div class="tags"><span class="tag">C++</span><span class="tag">OpenGL</span><span class="tag">GLSL</span></div>
+      </a>
+      <a class="card" href="https://github.com/IsaiahKoamalu/Wireframe_VG" target="_blank" rel="noopener">
+        <div class="title">Wireframe VG Engine</div>
+        <div class="blurb">A 3D vector-graphics engine inspired by old-school TRON-style rendering, with Perlin-noise infinite terrain and heavy matrix algebra.</div>
+        <div class="tags"><span class="tag">C++</span><span class="tag">Graphics</span></div>
+      </a>
+      <a class="card" href="https://github.com/IsaiahKoamalu/Engine-Particle-System" target="_blank" rel="noopener">
+        <div class="title">Audio-Reactive Particles</div>
+        <div class="blurb">A custom particle system that reacts to audio amplitude in real time, intended for animations and simulations.</div>
+        <div class="tags"><span class="tag">C++</span><span class="tag">SFML</span><span class="tag">GLM</span></div>
+      </a>
+      <a class="card" href="https://github.com/IsaiahKoamalu/FinalProgram" target="_blank" rel="noopener">
+        <div class="title">Data Hunter</div>
+        <div class="blurb">A 2D puzzle-exploration game set in an abandoned space station &mdash; final project for Intro to CS Principles II.</div>
+        <div class="tags"><span class="tag">C++</span><span class="tag">SFML</span></div>
+      </a>
+    </div>
+  </section>
+
+  <!-- ============ COURSEWORK ============ -->
+  <section id="coursework" class="reveal">
+    <div class="section-head">
+      <span class="num">04</span>
+      <h2>Coursework</h2>
+      <span class="rule"></span>
+    </div>
+    <div class="courses">
+      <span class="course">Deep Learning</span>
+      <span class="course">Natural Language Processing</span>
+      <span class="course">Artificial Intelligence</span>
+      <span class="course">Operating Systems</span>
+      <span class="course">Database Internals</span>
+      <span class="course">Networks &amp; Data Comm</span>
+      <span class="course">Systems Programming</span>
+      <span class="course">Data Structures</span>
+      <span class="course">Computer Organization</span>
+      <span class="course">Computer Architecture</span>
+      <span class="course">Astronomy I &amp; II</span>
+      <span class="course">Calculus I &amp; II</span>
+      <span class="course">Matrix Algebra</span>
+      <span class="course">Diff. Equations</span>
+      <span class="course">Discrete Math I &amp; II</span>
+      <span class="course">Probability Theory</span>
+    </div>
+  </section>
+
+  <!-- ============ FOOTER ============ -->
+  <footer>
+    <div><span class="done">done = True</span> Isaiah Broderson &mdash; Hilo, Hawai&#699;i</div>
+    <div class="footer-links">
+      <a href="mailto:isaiahkb@hawaii.edu">isaiahkb@hawaii.edu</a>
+      <a href="https://github.com/IsaiahKoamalu" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://www.linkedin.com/in/isaiah-broderson-3b34492a6" target="_blank" rel="noopener">LinkedIn</a>
+    </div>
+  </footer>
+
+</div>
+
+<script src="flight-sim.js"></script>
+<script src="flight.js"></script>
+</body>
+</html>
