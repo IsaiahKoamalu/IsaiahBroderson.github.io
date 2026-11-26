@@ -16,31 +16,59 @@ var FlightSim = (function () {
   const WALL_R = 7;          // half the thickness of a wall the visitor draws
   const ADAPT_GENS = 160;    // extra training a change to the world buys
 
+  // Orbit: a planet with inverse-square gravity; ships score for circling it near a target radius.
+  const PLANET = { x: W / 2, y: H / 2, r: 70 };
+  const GM = 1.1e7;         // circular speed at r = 240 is ~214 px/s: one orbit takes ~7 s
+  const ORBIT_LEAD = 0.5;   // the ship's "target" is a guide point this far ahead (radians) on the target orbit
+  const ORBIT_BAND = 150;   // how far off the target radius still earns credit
+  const ORBIT_PULL = 200;   // fitness for closing radial distance to the target orbit: 1 per this many px
+  const ORBIT_SCALE = 10;   // fitness per full orbit
+  const FUEL = 0.1;         // fitness cost per tick at full thrust: high enough that coasting pays
+  const ORBIT_MIN = 150, ORBIT_MAX = 340;
+
+  // Dock: match orbits with a station circling the planet and touch it gently.
+  const DOCK_R = 36;        // touching distance
+  const DOCK_V = 70;        // docking succeeds below this relative speed; faster is a crash
+  const DOCK_BONUS = 8;     // fitness for docking
+  const DOCK_PULL = 150;    // shaping: 1 fitness per this many px closer to the station
+  const DOCK_NEAR = 200;    // shaping: within this distance, relative speed starts to cost
+  const DOCK_SLOW = 60;     // shaping: 1 fitness per this much relative speed shed right at the station
+  const DOCK_FUEL = 0.02;   // fitness cost per tick at full thrust
+  const DOCK_GAP = [0.2, 1.0], DOCK_DR = 50, DOCK_SPEED = [0.9, 1.1];   // starts: behind (rad), off-orbit (px), speed
+  const planetary = (task) => task === 'orbit' || task === 'dock';
+
   const TASKS = {
     hunt:  { label: 'Hunt',  steps: 300, asteroids: 0, gravity: 0, drag: 0.97 },
     field: { label: 'Asteroid field', steps: 300, asteroids: 10, gravity: 0, drag: 0.94 },   // slow enough to dodge
-    land:  { label: 'Land',  steps: 300, asteroids: 0, gravity: GRAVITY, drag: 0.97 }
+    land:  { label: 'Land',  steps: 300, asteroids: 0, gravity: GRAVITY, drag: 0.97 },
+    orbit: { label: 'Orbit', steps: 300, asteroids: 0, gravity: 0, drag: 1 },                // no drag, or orbits decay
+    dock:  { label: 'Dock',  steps: 300, asteroids: 0, gravity: 0, drag: 1 }
   };
 
-  // ---------- Network: inputs → hidden (softsign) → outputs ----------
+  // ---------- Network: inputs → hidden layers (softsign) → outputs ----------
+  // Params are flat: for each layer, for each unit, its input weights then its bias.
+  // The live trainer uses LAYERS; networks trained in Python (fleet-rl) may be wider or deeper.
   const N_IN = 8 + RAYS.length, N_HID = 10, N_OUT = 2;
-  const N_PARAMS = N_IN * N_HID + N_HID + N_HID * N_OUT + N_OUT;
+  const LAYERS = [N_IN, N_HID, N_OUT];
+  const nParams = (layers) => layers.slice(1).reduce((s, o, i) => s + o * (layers[i] + 1), 0);
+  const N_PARAMS = nParams(LAYERS);
   const soft = (x) => x / (1 + Math.abs(x));
 
-  const obs = new Float64Array(N_IN), hid = new Float64Array(N_HID), out = new Float64Array(N_OUT);
+  // One activation buffer per layer; acts[0] is the observation.
+  const makeActs = (layers) => layers.map((n) => new Float64Array(n));
+  const scratch = makeActs(LAYERS);
 
-  function forward(p, input, hiddenOut, output) {
+  function forward(p, layers, acts) {
     let k = 0;
-    for (let h = 0; h < N_HID; h++) {
-      let s = 0;
-      for (let i = 0; i < N_IN; i++) s += p[k++] * input[i];
-      hiddenOut[h] = soft(s + p[k++]);
+    for (let l = 1; l < layers.length; l++) {
+      const input = acts[l - 1], output = acts[l], nIn = layers[l - 1];
+      for (let o = 0; o < layers[l]; o++) {
+        let s = 0;
+        for (let i = 0; i < nIn; i++) s += p[k++] * input[i];
+        output[o] = soft(s + p[k++]);
+      }
     }
-    for (let o = 0; o < N_OUT; o++) {
-      let s = 0;
-      for (let h = 0; h < N_HID; h++) s += p[k++] * hiddenOut[h];
-      output[o] = soft(s + p[k++]);
-    }
+    return acts[acts.length - 1];
   }
 
   // ---------- Seeded random numbers, so every network faces the same tests ----------
@@ -73,8 +101,36 @@ var FlightSim = (function () {
   function makeScenario(task, seed, world) {
     const r = rng(seed), cfg = TASKS[task], wd = world || {};
     const sc = { task, gravity: wd.gravity == null ? cfg.gravity : wd.gravity, drag: cfg.drag, steps: cfg.steps,
-                 asteroids: (wd.rocks || []).slice(), walls: (wd.walls || []).slice(), targets: [], override: null, padX: 0 };
+                 asteroids: (wd.rocks || []).slice(), walls: (wd.walls || []).slice(), targets: [], override: null,
+                 padX: 0, orbitR: 0, stationA: 0 };
     const between = (a, b) => a + r() * (b - a);
+
+    if (task === 'dock') {
+      // A station on a circular orbit (radius orbitR); the ship starts behind it on a nearby,
+      // roughly circular orbit.
+      sc.orbitR = between(200, 320);
+      sc.stationA = between(-Math.PI, Math.PI);
+      const ang = sc.stationA - between(DOCK_GAP[0], DOCK_GAP[1]);
+      const rad = sc.orbitR + between(-DOCK_DR, DOCK_DR);
+      const a = between(-Math.PI, Math.PI), v = Math.sqrt(GM / rad) * between(DOCK_SPEED[0], DOCK_SPEED[1]);
+      sc.start = { x: PLANET.x + Math.cos(ang) * rad, y: PLANET.y + Math.sin(ang) * rad, a,
+                   vx: -Math.sin(ang) * v, vy: Math.cos(ang) * v };
+      sc.asteroids = [{ x: PLANET.x, y: PLANET.y, r: PLANET.r, planet: true }];
+      return sc;
+    }
+
+    if (task === 'orbit') {
+      // Start on a rough orbit (60-115% of circular speed); the job is to transfer to the
+      // target radius and circularize, not to escape an immediate fall.
+      sc.orbitR = between(170, 330);
+      const ang = between(-Math.PI, Math.PI), rad = between(190, 400);
+      const a = between(-Math.PI, Math.PI), v = Math.sqrt(GM / rad) * between(0.6, 1.15);
+      sc.start = { x: PLANET.x + Math.cos(ang) * rad, y: PLANET.y + Math.sin(ang) * rad, a,
+                   vx: -Math.sin(ang) * v, vy: Math.cos(ang) * v };
+      // The planet doubles as an asteroid: the rays see it and touching it is a crash.
+      sc.asteroids = [{ x: PLANET.x, y: PLANET.y, r: PLANET.r, planet: true }];
+      return sc;
+    }
 
     if (task === 'land') {
       sc.padX = between(220, W - 220);
@@ -115,16 +171,39 @@ var FlightSim = (function () {
 
   function newShip(sc, jitter) {
     const s = sc.start, j = jitter || 0;
+    const x = s.x + (Math.random() - 0.5) * j, y = s.y + (Math.random() - 0.5) * j;
+    let pot = 0;   // Dock: shaping potential last tick
+    if (sc.task === 'dock') {
+      const st = stationAt(sc, 0);
+      pot = dockPotential(Math.hypot(st.x - x, st.y - y), Math.hypot(s.vx - st.vx, s.vy - st.vy));
+    }
     return {
-      x: s.x + (Math.random() - 0.5) * j, y: s.y + (Math.random() - 0.5) * j,
-      a: s.a, vx: s.vx, vy: s.vy, w: 0,
-      thrust: 0, turn: 0, alive: true, landed: false, crashed: false,
+      x, y, a: s.a, vx: s.vx, vy: s.vy, w: 0,
+      thrust: 0, turn: 0, alive: true, landed: false, crashed: false,   // landed: touched down or docked
       idx: 0, reached: 0, t: 0, fitness: 0,
-      prevD: null, rays: new Float64Array(RAYS.length)
+      phi: Math.atan2(y - PLANET.y, x - PLANET.x), orbits: 0,   // angle around the planet; orbits credited
+      rerr: Math.abs(Math.hypot(x - PLANET.x, y - PLANET.y) - sc.orbitR),   // distance from the target orbit
+      pot, prevD: null, rays: new Float64Array(RAYS.length)
     };
   }
 
-  const currentTarget = (ship, sc) => sc.override || sc.targets[Math.min(ship.idx, sc.targets.length - 1)];
+  // Dock: the station's position and velocity after t ticks. It circles at circular speed.
+  function stationAt(sc, t) {
+    const r = sc.orbitR, w = Math.sqrt(GM / (r * r * r)), ang = sc.stationA + w * t * DT;
+    const c = Math.cos(ang), s = Math.sin(ang);
+    return { x: PLANET.x + c * r, y: PLANET.y + s * r, vx: -s * w * r, vy: c * w * r, a: ang };
+  }
+  // Shaping for Dock: closer is better, and near the station, slower relative to it is better.
+  const dockPotential = (d, rv) => -d / DOCK_PULL - Math.max(0, 1 - d / DOCK_NEAR) * rv / DOCK_SLOW;
+
+  function currentTarget(ship, sc) {
+    if (sc.task === 'dock') return stationAt(sc, ship.t);
+    if (sc.task === 'orbit') {   // a guide point on the target orbit, a little ahead of the ship
+      const ang = Math.atan2(ship.y - PLANET.y, ship.x - PLANET.x) + ORBIT_LEAD;
+      return { x: PLANET.x + Math.cos(ang) * sc.orbitR, y: PLANET.y + Math.sin(ang) * sc.orbitR };
+    }
+    return sc.override || sc.targets[Math.min(ship.idx, sc.targets.length - 1)];
+  }
 
   // ---------- Sensors ----------
   function castRay(x, y, dx, dy, asteroids, walls) {
@@ -165,11 +244,21 @@ var FlightSim = (function () {
     input[0] = soft((dx * ca + dy * sa) / 300);
     input[1] = soft((-dx * sa + dy * ca) / 300);
     input[2] = Math.min(1, d / 900);
-    input[3] = soft((ship.vx * ca + ship.vy * sa) / 250);
-    input[4] = soft((-ship.vx * sa + ship.vy * ca) / 250);
+    // Velocity relative to the target (only the Dock station moves).
+    let vx = ship.vx, vy = ship.vy;
+    if (sc.task === 'dock') { vx -= t.vx; vy -= t.vy; }
+    input[3] = soft((vx * ca + vy * sa) / 250);
+    input[4] = soft((-vx * sa + vy * ca) / 250);
     input[5] = soft(ship.w / 3);
-    input[6] = sa;
-    input[7] = ca;
+    // Heading relative to "down": the screen's down, or toward the planet in Orbit and Dock.
+    // With down = (0, 1) these are just sin(a) and cos(a).
+    let ux = 0, uy = 1;
+    if (planetary(sc.task)) {
+      const gx = PLANET.x - ship.x, gy = PLANET.y - ship.y, g = Math.hypot(gx, gy);
+      ux = gx / g; uy = gy / g;
+    }
+    input[6] = ca * ux + sa * uy;
+    input[7] = ca * uy - sa * ux;
     for (let i = 0; i < RAYS.length; i++) {
       const ang = ship.a + RAYS[i];
       const hit = castRay(ship.x, ship.y, Math.cos(ang), Math.sin(ang), sc.asteroids, sc.walls);
@@ -180,12 +269,15 @@ var FlightSim = (function () {
   }
 
   // ---------- One physics + control step ----------
-  function stepShip(ship, params, sc, trace) {
+  // brain: flat params for the default LAYERS, or { p, layers } for any other network.
+  // trace: optional activation buffers (makeActs(layers)) to read the network's state afterwards.
+  function stepShip(ship, brain, sc, trace) {
     if (!ship.alive) return;
-    const hiddenBuf = trace ? trace.hidden : hid, outBuf = trace ? trace.output : out, inBuf = trace ? trace.input : obs;
-    const d0 = observe(ship, sc, inBuf);
+    const p = brain.layers ? brain.p : brain, layers = brain.layers || LAYERS;
+    const acts = trace || (brain.layers ? brain.acts || (brain.acts = makeActs(layers)) : scratch);
+    const d0 = observe(ship, sc, acts[0]);
     if (ship.prevD === null) ship.prevD = d0;
-    forward(params, inBuf, hiddenBuf, outBuf);
+    const outBuf = forward(p, layers, acts);
 
     ship.thrust = Math.max(0, outBuf[0]);
     ship.turn = outBuf[1];
@@ -193,6 +285,11 @@ var FlightSim = (function () {
     ship.a += ship.w * DT;
     ship.vx += Math.cos(ship.a) * ship.thrust * THRUST * DT;
     ship.vy += (Math.sin(ship.a) * ship.thrust * THRUST + sc.gravity) * DT;
+    if (planetary(sc.task)) {   // inverse-square pull toward the planet, from the pre-move position
+      const gx = PLANET.x - ship.x, gy = PLANET.y - ship.y, r2 = gx * gx + gy * gy;
+      const f = GM / (r2 * Math.sqrt(r2)) * DT;
+      ship.vx += gx * f; ship.vy += gy * f;
+    }
     ship.vx *= sc.drag; ship.vy *= sc.drag;
     ship.x += ship.vx * DT; ship.y += ship.vy * DT;
     ship.t++;
@@ -210,8 +307,10 @@ var FlightSim = (function () {
       ship.alive = false; ship.crashed = true; ship.fitness -= CRASH_PENALTY;
       return;
     }
+    if (sc.task === 'orbit') return orbitReward(ship, sc);
+    if (sc.task === 'dock') return dockReward(ship, sc);
 
-    const t =currentTarget(ship, sc), d = Math.hypot(t.x - ship.x, t.y - ship.y);
+    const t = currentTarget(ship, sc), d = Math.hypot(t.x - ship.x, t.y - ship.y);
     ship.fitness += (ship.prevD - d) / 500;
     ship.prevD = d;
     if (d < REACH_R) {
@@ -220,6 +319,41 @@ var FlightSim = (function () {
       if (!sc.override) ship.idx++;
       ship.prevD = null;
     }
+  }
+
+  // Credit angle travelled around the planet, scaled by how close the ship is to the target radius
+  // and to circular speed there, plus a small reward for closing in on the target radius.
+  // Going the wrong way costs credit; thrust costs fuel.
+  function orbitReward(ship, sc) {
+    const dx = ship.x - PLANET.x, dy = ship.y - PLANET.y, r = Math.hypot(dx, dy);
+    const phi = Math.atan2(dy, dx);
+    let dphi = phi - ship.phi;
+    dphi = Math.atan2(Math.sin(dphi), Math.cos(dphi));
+    const vc = Math.sqrt(GM / r), speed = Math.hypot(ship.vx, ship.vy);
+    const band = Math.max(0, 1 - Math.abs(r - sc.orbitR) / ORBIT_BAND);
+    const match = Math.max(0, 1 - Math.abs(speed - vc) / vc);
+    const gain = dphi / (2 * Math.PI) * band * match;
+    const err = Math.abs(r - sc.orbitR);
+    ship.fitness += gain * ORBIT_SCALE + (ship.rerr - err) / ORBIT_PULL - ship.thrust * FUEL;
+    ship.phi = phi;
+    ship.rerr = err;
+    ship.orbits += gain;
+  }
+
+  // Touching the station slowly docks (landed); touching it fast is a crash.
+  // Otherwise potential-based shaping toward it, and a fuel cost.
+  function dockReward(ship, sc) {
+    const st = stationAt(sc, ship.t);
+    const d = Math.hypot(st.x - ship.x, st.y - ship.y), rv = Math.hypot(ship.vx - st.vx, ship.vy - st.vy);
+    if (d < DOCK_R) {
+      ship.alive = false;
+      if (rv < DOCK_V) { ship.landed = true; ship.fitness += DOCK_BONUS; }
+      else { ship.crashed = true; ship.fitness -= CRASH_PENALTY; }
+      return;
+    }
+    const pot = dockPotential(d, rv);
+    ship.fitness += pot - ship.pot - ship.thrust * DOCK_FUEL;
+    ship.pot = pot;
   }
 
   function stepLand(ship, sc) {
@@ -246,7 +380,7 @@ var FlightSim = (function () {
 
   // ---------- Evaluate one network over a set of scenarios ----------
   function evaluate(params, scenarios) {
-    let total = 0, reached = 0, landed = 0, crashed = 0;
+    let total = 0, reached = 0, landed = 0, crashed = 0, orbits = 0;
     for (let i = 0; i < scenarios.length; i++) {
       const sc = scenarios[i], ship = newShip(sc);
       for (let t = 0; t < sc.steps && ship.alive; t++) stepShip(ship, params, sc);
@@ -254,9 +388,10 @@ var FlightSim = (function () {
       reached += ship.reached;
       landed += ship.landed ? 1 : 0;
       crashed += ship.crashed ? 1 : 0;
+      orbits += ship.orbits;
     }
     const n = scenarios.length;
-    return { fitness: total / n, reached: reached / n, landed: landed / n, crashed: crashed / n };
+    return { fitness: total / n, reached: reached / n, landed: landed / n, crashed: crashed / n, orbits: orbits / n };
   }
 
   // ---------- Trainer (cross-entropy method), runs in small time slices ----------
@@ -377,8 +512,8 @@ var FlightSim = (function () {
   };
 
   return {
-    W, H, DT, GROUND, PAD_HALF, SHIP_R, REACH_R, RAY_LEN, RAYS, TASKS, WALL_R, GRAVITY,
-    N_IN, N_HID, N_OUT, N_PARAMS,
-    makeScenario, newShip, stepShip, evaluate, Trainer, currentTarget
+    W, H, DT, GROUND, PAD_HALF, SHIP_R, REACH_R, RAY_LEN, RAYS, TASKS, WALL_R, GRAVITY, PLANET, GM, ORBIT_MIN, ORBIT_MAX, DOCK_R,
+    N_IN, N_HID, N_OUT, N_PARAMS, LAYERS, nParams, makeActs,
+    makeScenario, newShip, stepShip, evaluate, Trainer, currentTarget, stationAt
   };
 })();
